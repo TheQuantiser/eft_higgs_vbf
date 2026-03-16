@@ -17,6 +17,22 @@ import pandas as pd
 import json
 import os
 
+#ewk import
+from boostedhiggs.ewk_higgs_correction import add_HiggsEW_kFactors
+
+#systematic import
+from boostedhiggs.corrections import (
+    add_ps_weight,
+    add_pdf_weight,
+    add_scalevar_7pt,
+    add_scalevar_3pt
+)
+
+import importlib.util
+import boostedhiggs.corrections as corrections
+
+importlib.reload(corrections)
+
 def weight_names(reweight_card):
 
     with open('dictionary.json') as f:
@@ -71,7 +87,13 @@ def update(events, collections):
 
 # Look at ProcessorABC to see the expected methods and what they are supposed to do
 class VBFProcessor(processor.ProcessorABC):
-    def __init__(self, isMC=False):
+    def __init__(self, isMC=False, ewkHcorr=False, systematics=False):
+
+        #adding Higgs electroweak correction
+        self._ewkHcorr = ewkHcorr
+        #adding systematics
+        self._systematics = systematics
+        
         ################################
         # INITIALIZE COFFEA PROCESSOR
         ################################
@@ -85,6 +107,8 @@ class VBFProcessor(processor.ProcessorABC):
         dphiqq_axis = hist.axis.Regular(200, -3.15, 3.15, name="dphiqq", label=r"$\Delta\phi_{qq}$")
         mqq_axis = hist.axis.Regular(200, 0, 5000, name="mqq", label=r"$m_{qq}$ [GeV]")
         wc_axis = hist.axis.StrCategory([], name="wc", label="WC point", growth=True)
+        htxs_axis = hist.axis.IntCategory([], name = "htxs_stage2", label="HTXS stage1.2 code", growth=True)
+        syst_axis = hist.axis.StrCategory([], name="systematic", label="Systematic", growth=True)
 
         self.make_output = lambda: { 
             # Test histogram; not needed for final analysis but useful to check things are working
@@ -118,12 +142,25 @@ class VBFProcessor(processor.ProcessorABC):
                 wc_axis,
                 storage=hist.storage.Weight()
             ),
+            "htxs": hist.Hist(
+                htxs_axis,
+                wc_axis,
+                storage=hist.storage.Weight() #variances are stored in here. can do h.values() and h.variance()
+            ),
+            "templates": hist.Hist(
+                syst_axis,
+                htxs_axis,
+                wc_axis,
+                storage=hist.storage.Weight()
+            ),
             
             "EventCount": processor.value_accumulator(int),
+            "sumw_all_noEW": processor.value_accumulator(float),
+            "sumw_VBF_EW": processor.value_accumulator(float),
+            "n_evts": processor.value_accumulator(int),
         }
         
     def process(self, events):
-        
         output = self.make_output()
 
         ##################
@@ -143,6 +180,12 @@ class VBFProcessor(processor.ProcessorABC):
         detaqq = q1.eta - q2.eta
         dphiqq = q1.delta_phi(q2)
 
+        htxs_stage2 = events.HTXS["stage1_2_fine_cat_pTjet25GeV"]
+        if len(events) > 0:
+            htxs_arr = ak.to_numpy(htxs_stage2)
+            print("HTXS sample:", htxs_arr[:10])
+            print("HTXS unique (first 20):", np.unique(htxs_arr)[:])
+
         #####################
         # EVENT SELECTION
         #####################
@@ -158,8 +201,82 @@ class VBFProcessor(processor.ProcessorABC):
         ################
 
         # create a processor Weights object, with the same length as the number of events in the chunk
-        weights = Weights(len(events))
+        weights = Weights(len(events), storeIndividual=True)
         weights.add('genweight', events.genWeight)
+
+        output["sumw_all_noEW"] += float(ak.sum(events.genWeight))
+        output["EventCount"] += int(len(events))
+        output["n_evts"] += int(len(events))
+
+       #ew correction diagnostics
+        dataset = events.metadata.get("dataset", "")
+        
+        #weight before EW correction
+        w_before = weights.weight()
+        
+        if self._ewkHcorr:
+            try:
+                hpt = add_HiggsEW_kFactors(weights, events.GenPart, "VBF")
+                print("EWK applied")
+            except Exception as e:
+                print("EWK exception:", repr(e))
+
+        if self._systematics:
+            if "LHEScaleWeight" in events.fields:
+                add_scalevar_3pt(weights, events.LHEScaleWeight)
+            else:
+                add_scalevar_3pt(weights, [])
+        print("type:", ak.type(events.LHEScaleWeight))
+        print("LHEScaleWeight: ", events.LHEScaleWeight)
+        print("variations:", list(weights.variations))
+
+        systematics = [None] + list(weights.variations)
+
+        # SM templates
+        for syst in systematics:
+            sname = "nominal" if syst is None else syst
+            w = weights.weight() if syst is None else weights.weight(modifier=syst)
+        
+            # Yield-only version:
+            output["templates"].fill(
+                systematic=sname,
+                htxs_stage2=htxs_stage2,
+                wc="SM",
+                weight=w,
+            )
+        
+        output["sumw_VBF_EW"] += float(ak.sum(weights.weight()))
+        
+        #weight after EW correction
+        w_after = weights.weight()
+        
+        print("avg weight before:", float(ak.mean(w_before)))
+        print("avg weight after: ", float(ak.mean(w_after)))
+
+        k = weights.partial_weight(include=["VBF_EW"])
+
+        is_bin1 = (htxs_stage2 == 221) | (htxs_stage2== 222)
+        is_bin2 = (htxs_stage2 == 223) | (htxs_stage2 == 224)
+        
+        print("avg correction applied to bin1:", float(ak.mean(k[is_bin1])))
+        print("avg correction applied to bin2:", float(ak.mean(k[is_bin2])))
+        
+        w_nom = weights.weight()
+        
+        y1_nom = float(ak.sum(w_nom[is_bin1]))
+        y2_nom = float(ak.sum(w_nom[is_bin2]))
+
+        def safe_ratio(num, den):
+            return num / den if den != 0 else float("nan")
+            
+        for systematic in ["scalevar_3ptUp", "scalevar_3ptDown"]:
+            w_systematic = weights.weight(modifier=systematic)
+            y1 = float(ak.sum(w_systematic[is_bin1]))
+            y2 = float(ak.sum(w_systematic[is_bin2]))
+            print(systematic,
+              "bin1 ratio:", safe_ratio(y1, y1_nom),
+              "bin2 ratio:", safe_ratio(y2, y2_nom))
+
 
         ###################
         # FILL HISTOGRAMS
@@ -200,6 +317,10 @@ class VBFProcessor(processor.ProcessorABC):
                                    wc=names[i],
                                    weight=weights.weight()*events.LHEReweightingWeight[:,i]
                                   )
+                output['htxs'].fill(htxs_stage2=htxs_stage2,
+                                   wc=names[i],
+                                   weight = weights.weight()*events.LHEReweightingWeight[:,i]
+                                   )
 
             # Also do SM
             output['q1pt'].fill(q1pt=q1.pt,
@@ -226,11 +347,16 @@ class VBFProcessor(processor.ProcessorABC):
                                wc='SM',
                                weight=weights.weight()
                            )
+            output['htxs'].fill(htxs_stage2=htxs_stage2,
+                                wc='SM',
+                                weight=weights.weight(),
+                                )
             
             # End if LHE weight
                 
-        except:
-            print('except')
+        except Exception as e:
+            print("except:", repr(e))
+
             output['q1pt'].fill(q1pt=q1.pt,
                                 wc='SM',
                                 weight=weights.weight()
@@ -255,6 +381,10 @@ class VBFProcessor(processor.ProcessorABC):
                                wc='SM',
                                weight=weights.weight()
                               )
+            output['htxs'].fill(htxs_stage2=htxs_stage2,
+                                wc='SM',
+                                weight=weights.weight(),
+                                )
             
         # End if no LHE weight
     

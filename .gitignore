@@ -1,0 +1,11 @@
+*.root
+*.parquet
+*.hdf5
+*.log
+*.pdf
+*.png
+*.jpg
+*.json~
+__pycache__/
+.ipynb_checkpoints/
+coffea/__pycache__/

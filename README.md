@@ -1,8 +1,9 @@
-Core code:
-**`stxs_reweight_function.ipynb`** is used for running processor (producing coffea) and testing stxs function code.
-**`stxs_functions.py`** contains all the functions necessary for quadratic fitting and likelihood scans.
-**`vbfprocessor.py`** is the processor used in **`stxs_reweight_function.ipynb`**.
-**`fit_plots.ipynb`** is used for plotting likelihood scans and reweighted STXS bins. **`stxs_plotting.ipynb`** also contains stxs plots.
+Core code:\
+**`stxs_reweight_function.ipynb`** is used for running processor (producing coffea) and testing stxs function code.\
+**`stxs_functions.py`** contains all the functions necessary for quadratic fitting and likelihood scans.\
+**`vbfprocessor.py`** is the processor used in **`stxs_reweight_function.ipynb`**.\
+**`fit_plots.ipynb`** is used for plotting likelihood scans and reweighted STXS bins. **`stxs_plotting.ipynb`** also contains stxs plots.\
+**`frankensteincfg.py`** is my modified pythia cfg. It uses CMS_SW_13_2_9.
 
 
 Note: **`stxs_reweight_fit.ipynb`** only works for two operators or less at a time for now; working on generalizing to n-dimensional fits
